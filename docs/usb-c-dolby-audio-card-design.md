@@ -1,4 +1,4 @@
-# USB-C Dolby Digital 5.1 Audio Card Concept
+# USB-C 5.1 Audio Card with Dolby/DTS Passthrough Concept
 
 This document captures a first-pass hardware architecture for a USB-C audio
 card with real-time processing, 5.1 analog RCA/cinch outputs, optical Toslink
@@ -12,22 +12,19 @@ single external USB-C port for both USB audio data and bus power.
 - The card is bus-powered from the same external USB-C port that carries the
   audio data. There is no battery, no battery charger, and no separate charging
   port in this revision.
-- Power budget is now a primary design constraint. A basic USB 2.0/USB-C host
+- Power budget is a primary design constraint. A basic USB 2.0/USB-C host
   may only provide 5 V at limited current; a USB-C source that advertises 1.5 A,
-  3 A, or a USB PD contract gives more headroom for SHARC DSP, DACs, op amps,
-  Toslink, and the internal expansion port.
+  3 A, or a USB PD contract gives more headroom for the audio DSP, DACs, op
+  amps, Toslink, and the internal expansion port.
 - The 5.1 analog output path is the primary multichannel output path.
-- Dolby Digital decoding or encoding cannot be implemented legally by only
-  buying a DSP IC. Dolby technologies require a Dolby license, licensed
-  decoder/encoder object code, and product certification. The hardware below
-  is sized for that path, but the Dolby license and software deliverables are
-  separate commercial items.
+- This revision intentionally does not include Dolby or DTS decode/encode
+  hardware/software. It processes uncompressed PCM only, which avoids Dolby/DTS
+  licensing for the product's own DSP path.
 - Toslink/S/PDIF cannot carry uncompressed 5.1 PCM. It can carry stereo PCM or
-  compressed surround bitstreams such as AC-3/Dolby Digital. If the product
-  must output processed 5.1 over Toslink, it needs a licensed real-time Dolby
-  Digital encoder, often marketed as Dolby Digital Live. Without that encoder,
-  Toslink should be limited to processed stereo PCM/downmix or passthrough of
-  an already-compressed Dolby Digital bitstream.
+  compressed surround bitstreams such as AC-3/Dolby Digital or DTS. Toslink is
+  therefore limited to processed stereo PCM/downmix or passthrough of an
+  already-compressed Dolby/DTS bitstream. The card cannot EQ/volume-process a
+  passed-through compressed bitstream because it is not decoding it.
 - The four front-panel sliders are read by an MCU ADC and applied in DSP as
   digital filter/gain controls. They are not placed directly in the analog
   audio path.
@@ -45,7 +42,8 @@ flowchart LR
     hub --> xmos["XMOS XU316\nUSB Audio Class 2.0\n8ch PCM / IEC61937 capable"]
     hub --> intusb["INTERNAL USB-C EXPANSION\nDFP downstream port\nfuture Bluetooth/add-on module"]
 
-    xmos -- "TDM/I2S PCM or IEC61937 bitstream" --> dsp["ADI SHARC DSP\nADSP-21489\nDolby licensed decode/encode*\nEQ, volume, bass management"]
+    xmos -- "TDM/I2S multichannel PCM" --> dsp["Audio DSP\nADAU1467 / ADAU1452 class\nEQ, volume, routing, downmix"]
+    xmos -- "IEC61937 compressed passthrough\nAC-3 / DTS, no DSP processing" --> spdifmux["S/PDIF source select\nPCM from DSP or passthrough from XMOS"]
 
     sliders["4 sliders\nlow / mid / high / volume"] --> mcu["STM32G0 control MCU\nADC, I2C/SPI, soft power"]
     button["Power button"] --> mcu
@@ -58,8 +56,9 @@ flowchart LR
     dac --> filters["6x differential-to-single-ended\nLPF / line drivers"]
     filters --> rca["5.1 RCA/cinch outputs\nFL FR C LFE SL SR"]
 
-    dsp -- "S/PDIF TX" --> optdrv["Toslink LED driver"]
-    optdrv --> toslink["Toslink optical output\nstereo PCM, AC-3 passthrough,\nor licensed encoded 5.1"]
+    dsp -- "processed stereo PCM S/PDIF" --> spdifmux
+    spdifmux --> optdrv["Toslink LED driver"]
+    optdrv --> toslink["Toslink optical output\nprocessed stereo PCM\nor AC-3/DTS passthrough"]
 
     pwr --> rails["System power rails\n5V analog, 3.3V I/O,\n1.2V/1.0V cores"]
     rails --> hub
@@ -70,8 +69,8 @@ flowchart LR
     rails --> intusb
 ```
 
-`*` Dolby decode/encode capability depends on the exact licensed software bundle
-and certification, not only on the selected DSP silicon.
+Compressed passthrough means the card forwards the encoded S/PDIF payload
+without decoding, EQ, volume, or bass-management changes.
 
 ## Signal and connection notes
 
@@ -100,13 +99,13 @@ and certification, not only on the selected DSP silicon.
 ### Audio processing
 
 - XMOS XU316 handles the low-latency UAC2 endpoint and streams audio to the
-  SHARC DSP over TDM/I2S.
-- The SHARC DSP performs:
-  - Dolby Digital decode when provided with licensed Dolby/ADI software and a
-    valid compressed bitstream.
+  audio DSP over TDM/I2S.
+- The audio DSP performs PCM-only processing:
   - Low, mid, high EQ from the three sliders using biquad filters.
   - Master volume from the volume slider.
   - Channel routing, optional downmix, mute, limiter, and bass-management logic.
+- The audio DSP does not decode Dolby Digital, Dolby Digital Plus, DTS, or any
+  other licensed compressed surround format.
 - PCM1690 receives 6 or 8 channels of processed PCM over TDM/I2S and provides
   enough DAC channels for 5.1 plus two spare channels.
 - DAC outputs should use low-noise differential-to-single-ended reconstruction
@@ -117,14 +116,14 @@ and certification, not only on the selected DSP silicon.
 
 Recommended firmware modes:
 
-1. **Stereo PCM optical output:** processed stereo/downmix; no Dolby encoder
-   required.
-2. **Dolby Digital passthrough:** pass an incoming AC-3/IEC61937 bitstream to
-   Toslink; EQ/volume processing generally cannot be applied because the stream
-   remains compressed.
-3. **Processed 5.1 optical output:** decode, process, then re-encode as Dolby
-   Digital. This requires a licensed real-time Dolby Digital encoder and
-   certification.
+1. **Processed stereo PCM optical output:** DSP applies EQ/volume/downmix and
+   sends stereo PCM to Toslink.
+2. **Dolby Digital / DTS passthrough:** pass an incoming AC-3, DTS, or other
+   IEC61937-compatible S/PDIF payload to Toslink unchanged. EQ, volume, and bass
+   management are bypassed because the payload remains compressed.
+3. **Processed 5.1 optical output:** not included in this unlicensed revision.
+   It would require decode, processing, and real-time re-encoding using licensed
+   Dolby Digital Live or DTS Interactive/DTS Connect technology.
 
 ### Power from the audio USB-C port
 
@@ -154,15 +153,15 @@ purchase and before PCB release.
 | USB hub | 1 | Microchip USB2512B-I/M2 | 579-USB2512B-I/M2 | Two-port USB 2.0 high-speed hub. Downstream ports go to XMOS and internal expansion connector. |
 | USB audio controller | 1 | XMOS XU316-1024-TQ128-C24 | 1069-3161024TQ128C24 | UAC2 multichannel audio bridge. XMOS reference software supports multichannel USB audio, S/PDIF, MIDI, and TDM/I2S-style audio routing. |
 | USB ESD protection | 2-3 | ST USBLC6-2SC6 | 511-USBLC6-2SC6 | Low-capacitance USB 2.0 data-line protection for USB-C D+/D- pairs. Use one per exposed USB port and as needed near internal connector. |
-| Main audio DSP | 1 | Analog Devices ADSP-21489KSWZ-4A | 584-ADSP21489KSWZ-4A | SHARC DSP for licensed Dolby decode/encode path, EQ, volume, routing, and S/PDIF. Confirm exact Dolby software and certification before final design. |
-| Optional newer DSP alternative | 1 | Analog Devices ADSP-21569 family | Search Mouser for ADSP-21569 | Higher-performance SHARC+ option for newer Dolby stacks; package and supply complexity are higher, and inventory should be verified. |
+| PCM audio DSP | 1 | Analog Devices ADAU1467WBCPZ300 or ADAU1452WBCPZ | 584-ADAU1467WBCPZ300 / search Mouser for ADAU1452WBCPZ | Lower-cost SigmaDSP-class processor for EQ, volume, routing, downmix, and bass management on PCM. No Dolby/DTS decode or encode. |
 | Boot/config flash | 2 | Winbond W25Q64JVSSIQ or W25Q128JVSIQ | Search Mouser for W25Q64JVSSIQ / W25Q128JVSIQ | QSPI/SPI flash for XMOS and DSP firmware as required by final boot architecture. |
 | Multichannel DAC | 1 | Texas Instruments PCM1690DCA | 595-PCM1690DCA | 8-channel, 24-bit, 192 kHz DAC with TDM/I2S support. Use 6 channels for 5.1; keep 2 channels spare. |
 | Audio op amps | 6-8 | Texas Instruments OPA1678IDR | 595-OPA1678IDR | Low-noise dual audio op amps for DAC reconstruction filters and RCA line drivers. Final count depends on filter topology. |
 | RCA/cinch outputs | 1 or 6 | Same Sky RCJ-61232323 or individual RCA jacks | Search Mouser for RCJ-61232323 / RCA phono connectors | Six analog outputs. A 2x3 stack saves panel area; individual jacks allow standard 5.1 color coding. |
+| S/PDIF source select | 1 | SN74LVC1G3157DBVR or equivalent 2:1 digital switch/mux | Search Mouser for SN74LVC1G3157DBVR | Selects processed stereo PCM S/PDIF from the DSP or compressed AC-3/DTS passthrough from XMOS for the Toslink transmitter. |
 | Toslink transmitter | 1 | Toshiba TOTX1350(F) | 757-TOTX1350F | Optical S/PDIF transmitter module. Requires LED drive circuit. |
-| Toslink driver logic | 1 | SN74LVC1T45DBVR or SN74LVC1G04DBVR | Search Mouser for SN74LVC1T45DBVR / SN74LVC1G04DBVR | Level/edge conditioning from DSP S/PDIF output to Toslink LED driver. Choose based on DSP I/O voltage and polarity. |
-| Control MCU | 1 | ST STM32G071RBT6 or STM32G0B1KET6N | Search Mouser for STM32G071RBT6 / STM32G0B1KET6N | Reads four sliders and button; controls DSP/DAC/XMOS/hub/PD status over I2C/SPI/GPIO. STM32G0 parts also provide USB-C/PD-capable variants if desired. |
+| Toslink driver logic | 1 | SN74LVC1T45DBVR or SN74LVC1G04DBVR | Search Mouser for SN74LVC1T45DBVR / SN74LVC1G04DBVR | Level/edge conditioning from the selected S/PDIF source to the Toslink LED driver. Choose based on I/O voltage and polarity. |
+| Control MCU | 1 | ST STM32G071RBT6 or STM32G0B1KET6N | Search Mouser for STM32G071RBT6 / STM32G0B1KET6N | Reads four sliders and button; controls DSP/DAC/XMOS/hub/S/PDIF mux/PD status over I2C/SPI/GPIO. STM32G0 parts also provide USB-C/PD-capable variants if desired. |
 | EQ/volume sliders | 4 | Bourns PTA3043-2010CPB103 or PTA/PTB 10 kOhm linear equivalent | Search Mouser for PTA3043 10K linear slide potentiometer | Low, mid, high, and volume controls. Wire as 3.3 V ADC dividers with RC filtering; use linear taper because DSP maps the response curve. |
 | Power button | 1 | E-Switch TL3305AF160QG or equivalent momentary tact switch | Search Mouser for TL3305AF160QG | Soft on/off input to MCU or power latch circuit. |
 | USB-C PD sink | 1 | STMicroelectronics STUSB4500QTR | 511-STUSB4500QTR | Optional but recommended PD sink controller on the same external USB-C audio/data connector. Configure PDOs for the desired bus-power voltage/current. If omitted, design for USB-C default/advertised current at 5 V. |
@@ -174,11 +173,12 @@ purchase and before PCB release.
 
 ## Open engineering items before schematic capture
 
-1. Decide whether Toslink must output processed 5.1. If yes, budget and license
-   for a Dolby Digital real-time encoder; otherwise implement stereo PCM/downmix
-   and/or AC-3 passthrough.
-2. Confirm the exact Dolby decode/encode software package and certified target
-   processor with Dolby/ADI before locking the DSP part number.
+1. Decide which USB audio descriptors/endpoints are needed for both multichannel
+   PCM playback and encoded IEC61937 passthrough. Passthrough support is mostly
+   a USB firmware/driver compatibility task, not a Dolby/DTS decoder task.
+2. Decide whether the host-facing UI should expose separate modes for "5.1 PCM
+   analog output", "stereo PCM Toslink", and "encoded passthrough Toslink" to
+   avoid sending compressed data into the PCM DSP path.
 3. Complete a bus-power budget for 5 V default USB-C, 5 V at 1.5 A/3 A, and any
    desired USB PD profiles before locking regulators, expansion-port current,
    and analog output headroom.
