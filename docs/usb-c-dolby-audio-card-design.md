@@ -3,12 +3,19 @@
 This document captures a first-pass hardware architecture for a USB-C audio
 card with real-time processing, 5.1 analog RCA/cinch outputs, optical Toslink
 output, user EQ/volume controls, an internal USB-C expansion port, and a
-separate USB-C Power Delivery charging port.
+single external USB-C port for both USB audio data and bus power.
 
 ## Key assumptions and constraints
 
 - The external audio input USB-C port is a USB Audio Class 2.0 device port for a
   phone, tablet, PC, or console host.
+- The card is bus-powered from the same external USB-C port that carries the
+  audio data. There is no battery, no battery charger, and no separate charging
+  port in this revision.
+- Power budget is now a primary design constraint. A basic USB 2.0/USB-C host
+  may only provide 5 V at limited current; a USB-C source that advertises 1.5 A,
+  3 A, or a USB PD contract gives more headroom for SHARC DSP, DACs, op amps,
+  Toslink, and the internal expansion port.
 - The 5.1 analog output path is the primary multichannel output path.
 - Dolby Digital decoding or encoding cannot be implemented legally by only
   buying a DSP IC. Dolby technologies require a Dolby license, licensed
@@ -29,8 +36,11 @@ separate USB-C Power Delivery charging port.
 
 ```mermaid
 flowchart LR
-    host["USB-C AUDIO INPUT\nUFP, USB 2.0 HS, UAC2"] --> esd1["USB-C CC + ESD\nVBUS sense only"]
-    esd1 --> hub["USB2512B\n2-port USB 2.0 HS hub"]
+    host["USB-C AUDIO + POWER INPUT\nUFP, USB 2.0 HS, UAC2\nbus powered"] --> usbc["USB-C front end\nCC/PD sink + ESD + input protection"]
+    usbc -- "D+/D-" --> hub["USB2512B\n2-port USB 2.0 HS hub"]
+    usbc -- "VBUS 5 V default\nor PD-negotiated 9/12/15/20 V" --> pwr["Input eFuse / power path\ninrush + overcurrent protection"]
+    usbc -- "CC / PD policy" --> pd["STUSB4500 or STM32G0 UCPD\nPD sink on same connector"]
+    pd --> pwr
 
     hub --> xmos["XMOS XU316\nUSB Audio Class 2.0\n8ch PCM / IEC61937 capable"]
     hub --> intusb["INTERNAL USB-C EXPANSION\nDFP downstream port\nfuture Bluetooth/add-on module"]
@@ -42,7 +52,7 @@ flowchart LR
     mcu -- "I2C/SPI control" --> dsp
     mcu -- "I2C/SPI config" --> xmos
     mcu -- "I2C/SPI config" --> dac
-    mcu -- "charger telemetry/config" --> charger
+    mcu -- "PD status / power budget" --> pd
 
     dsp -- "6ch or 8ch TDM/I2S PCM" --> dac["PCM1690\n8-channel audio DAC"]
     dac --> filters["6x differential-to-single-ended\nLPF / line drivers"]
@@ -51,10 +61,7 @@ flowchart LR
     dsp -- "S/PDIF TX" --> optdrv["Toslink LED driver"]
     optdrv --> toslink["Toslink optical output\nstereo PCM, AC-3 passthrough,\nor licensed encoded 5.1"]
 
-    charge["USB-C PD CHARGE INPUT\nsink only"] --> pd["STUSB4500\nUSB-C PD sink controller"]
-    pd --> charger["BQ25713\n1-4 cell buck-boost charger\npower path"]
-    battery["2S Li-ion/Li-poly pack\nwith protection + NTC"] <--> charger
-    charger --> rails["System power rails\n5V analog, 3.3V I/O,\n1.2V/1.0V cores"]
+    pwr --> rails["System power rails\n5V analog, 3.3V I/O,\n1.2V/1.0V cores"]
     rails --> hub
     rails --> xmos
     rails --> dsp
@@ -71,11 +78,15 @@ and certification, not only on the selected DSP silicon.
 ### USB audio and expansion
 
 - The external audio USB-C connector is wired as a USB 2.0 high-speed upstream
-  device port:
+  device port and bus-power input:
   - D+/D- to the upstream pins of the USB2512B hub.
-  - CC1/CC2 each use 5.1 kOhm Rd pulldowns for a USB-C device/UFP.
-  - VBUS is sensed for attach detection but the board is self-powered from the
-    battery/charger power tree.
+  - CC1/CC2 go to the selected USB-C/PD sink controller. If PD is omitted, use
+    the standard 5.1 kOhm Rd pulldowns for a USB-C device/UFP and design for the
+    advertised default/1.5 A/3 A Type-C current only.
+  - VBUS feeds input protection, inrush limiting, and the system regulators.
+  - Firmware should expose only the functions that fit the negotiated power
+    budget. For example, reduce internal expansion-port power or disable high
+    output-drive modes if the host only supplies default USB power.
 - USB2512B downstream port 1 connects to the XMOS XU316 USB audio controller.
 - USB2512B downstream port 2 connects to the internal USB-C expansion
   receptacle.
@@ -115,14 +126,18 @@ Recommended firmware modes:
    Digital. This requires a licensed real-time Dolby Digital encoder and
    certification.
 
-### Power and charging
+### Power from the audio USB-C port
 
-- The charge USB-C port is independent of the audio USB-C port.
-- STUSB4500 negotiates a USB-C PD sink contract, for example 9 V, 12 V, 15 V, or
-  20 V depending on charger capability and thermal design.
-- BQ25713 handles battery charging and system power path for a 1S to 4S pack.
-  A 2S protected Li-ion/Li-poly pack is a practical starting point because it
-  keeps analog headroom and buck conversion efficient.
+- The card has no battery and no separate charging input. All rails are derived
+  from the external audio/data USB-C port VBUS.
+- With a simple USB-C source, expect 5 V input. With USB PD, the same connector
+  may negotiate a higher-voltage sink contract, for example 9 V, 12 V, 15 V, or
+  20 V. Higher VBUS reduces cable current but requires regulators and protection
+  rated for the negotiated voltage.
+- If the product must be compatible with ordinary PC USB-C ports, complete a
+  worst-case power budget at 5 V before schematic capture. The internal USB-C
+  expansion port should be power-limited or disabled when the upstream source
+  cannot supply enough current.
 - The power button is implemented as a soft-power input to the MCU. The MCU
   enables/disables downstream regulators and load switches in a safe sequence:
   analog muted, DAC reset/configured, DSP running, then outputs unmuted.
@@ -135,10 +150,10 @@ purchase and before PCB release.
 
 | Area | Qty | Manufacturer part | Mouser part / search key | Purpose and notes |
 | --- | ---: | --- | --- | --- |
-| USB-C connectors | 3 | Amphenol ICC 12401610E4#2A | 523-12401610E4#2A | External audio USB-C, internal expansion USB-C, and charging USB-C receptacles. USB 3.x-capable connector used even though this design only requires USB 2.0 data. |
+| USB-C connectors | 2 | Amphenol ICC 12401610E4#2A | 523-12401610E4#2A | External audio/data/power USB-C receptacle and internal expansion USB-C receptacle. USB 3.x-capable connector used even though this design only requires USB 2.0 data. |
 | USB hub | 1 | Microchip USB2512B-I/M2 | 579-USB2512B-I/M2 | Two-port USB 2.0 high-speed hub. Downstream ports go to XMOS and internal expansion connector. |
 | USB audio controller | 1 | XMOS XU316-1024-TQ128-C24 | 1069-3161024TQ128C24 | UAC2 multichannel audio bridge. XMOS reference software supports multichannel USB audio, S/PDIF, MIDI, and TDM/I2S-style audio routing. |
-| USB ESD protection | 3-4 | ST USBLC6-2SC6 | 511-USBLC6-2SC6 | Low-capacitance USB 2.0 data-line protection for USB-C D+/D- pairs. Use one per exposed USB port and as needed near internal connector. |
+| USB ESD protection | 2-3 | ST USBLC6-2SC6 | 511-USBLC6-2SC6 | Low-capacitance USB 2.0 data-line protection for USB-C D+/D- pairs. Use one per exposed USB port and as needed near internal connector. |
 | Main audio DSP | 1 | Analog Devices ADSP-21489KSWZ-4A | 584-ADSP21489KSWZ-4A | SHARC DSP for licensed Dolby decode/encode path, EQ, volume, routing, and S/PDIF. Confirm exact Dolby software and certification before final design. |
 | Optional newer DSP alternative | 1 | Analog Devices ADSP-21569 family | Search Mouser for ADSP-21569 | Higher-performance SHARC+ option for newer Dolby stacks; package and supply complexity are higher, and inventory should be verified. |
 | Boot/config flash | 2 | Winbond W25Q64JVSSIQ or W25Q128JVSIQ | Search Mouser for W25Q64JVSSIQ / W25Q128JVSIQ | QSPI/SPI flash for XMOS and DSP firmware as required by final boot architecture. |
@@ -147,17 +162,15 @@ purchase and before PCB release.
 | RCA/cinch outputs | 1 or 6 | Same Sky RCJ-61232323 or individual RCA jacks | Search Mouser for RCJ-61232323 / RCA phono connectors | Six analog outputs. A 2x3 stack saves panel area; individual jacks allow standard 5.1 color coding. |
 | Toslink transmitter | 1 | Toshiba TOTX1350(F) | 757-TOTX1350F | Optical S/PDIF transmitter module. Requires LED drive circuit. |
 | Toslink driver logic | 1 | SN74LVC1T45DBVR or SN74LVC1G04DBVR | Search Mouser for SN74LVC1T45DBVR / SN74LVC1G04DBVR | Level/edge conditioning from DSP S/PDIF output to Toslink LED driver. Choose based on DSP I/O voltage and polarity. |
-| Control MCU | 1 | ST STM32G071RBT6 or STM32G0B1KET6N | Search Mouser for STM32G071RBT6 / STM32G0B1KET6N | Reads four sliders and button; controls DSP/DAC/XMOS/hub/charger over I2C/SPI/GPIO. STM32G0 parts also provide USB-C/PD-capable variants if desired. |
+| Control MCU | 1 | ST STM32G071RBT6 or STM32G0B1KET6N | Search Mouser for STM32G071RBT6 / STM32G0B1KET6N | Reads four sliders and button; controls DSP/DAC/XMOS/hub/PD status over I2C/SPI/GPIO. STM32G0 parts also provide USB-C/PD-capable variants if desired. |
 | EQ/volume sliders | 4 | Bourns PTA3043-2010CPB103 or PTA/PTB 10 kOhm linear equivalent | Search Mouser for PTA3043 10K linear slide potentiometer | Low, mid, high, and volume controls. Wire as 3.3 V ADC dividers with RC filtering; use linear taper because DSP maps the response curve. |
 | Power button | 1 | E-Switch TL3305AF160QG or equivalent momentary tact switch | Search Mouser for TL3305AF160QG | Soft on/off input to MCU or power latch circuit. |
-| USB-C PD sink | 1 | STMicroelectronics STUSB4500QTR | 511-STUSB4500QTR | Standalone PD sink controller for the charging USB-C port. Configure PDOs for the desired charger voltage/current. |
-| Battery charger / power path | 1 | Texas Instruments BQ25713RSNR | 595-BQ25713RSNR | 1S-4S NVDC buck-boost charger controller with USB-C/PD input support. Requires external MOSFETs, inductor, current sense, and layout care. |
-| Main buck regulator | 1-2 | Texas Instruments LMR33630ADDAR or TPS62130RGTR | Search Mouser for LMR33630ADDAR / 595-TPS62130RGTR | Generate 5 V and/or 3.3 V system rails from battery/system voltage. Use LMR33630 for higher input voltage rails; use TPS62130 for compact 3 A point-of-load rails. |
+| USB-C PD sink | 1 | STMicroelectronics STUSB4500QTR | 511-STUSB4500QTR | Optional but recommended PD sink controller on the same external USB-C audio/data connector. Configure PDOs for the desired bus-power voltage/current. If omitted, design for USB-C default/advertised current at 5 V. |
+| Main buck regulator | 1-2 | Texas Instruments LMR33630ADDAR or TPS62130RGTR | Search Mouser for LMR33630ADDAR / 595-TPS62130RGTR | Generate 5 V and/or 3.3 V system rails from USB-C VBUS. Use LMR33630 for higher PD input voltage rails; use TPS62130 for compact 3 A point-of-load rails after a 5 V input rail. |
 | Low-noise analog LDO | 1-2 | Texas Instruments TPS7A4700RGWR | 595-TPS7A4700RGWR | Clean post-regulated analog rail for DAC/op amp supplies where dropout and thermal budget allow. |
 | Load switch | 2-4 | Texas Instruments TPS22965DSGR | 595-TPS22965DSGR | Soft-power sequencing and switched rails for USB expansion, analog output, or digital subsystems. |
-| Battery pack | 1 | 2S protected Li-ion/Li-poly pack with NTC | Select certified pack/vendor | Select capacity, protection, safety certification, and connector after mechanical/thermal design. Mouser carries battery-related parts, but the final pack should be sourced as a certified assembly. |
 | Audio clocks | 2 | 22.5792 MHz and 24.576 MHz low-jitter oscillators | Search Mouser for Abracon/NDK/Crystek audio oscillators | Support both 44.1 kHz and 48 kHz sample-rate families unless final firmware uses ASRC-only clocking. |
-| Passives/protection | As needed | 1% resistors, X7R capacitors, ferrites, common-mode chokes, input fuses | Mouser stocked commodity parts | Include USB-C CC resistors, PD input fuse/TVS, LC filters, DAC reference parts, analog coupling caps, and EMI parts. |
+| Passives/protection | As needed | 1% resistors, X7R capacitors, ferrites, common-mode chokes, input fuses | Mouser stocked commodity parts | Include USB-C CC/PD support parts, VBUS fuse/eFuse/TVS, LC filters, DAC reference parts, analog coupling caps, and EMI parts. |
 
 ## Open engineering items before schematic capture
 
@@ -166,8 +179,9 @@ purchase and before PCB release.
    and/or AC-3 passthrough.
 2. Confirm the exact Dolby decode/encode software package and certified target
    processor with Dolby/ADI before locking the DSP part number.
-3. Choose the battery configuration and enclosure first enough to complete
-   charging current, thermal, safety, and certification analysis.
+3. Complete a bus-power budget for 5 V default USB-C, 5 V at 1.5 A/3 A, and any
+   desired USB PD profiles before locking regulators, expansion-port current,
+   and analog output headroom.
 4. Decide whether the internal USB-C expansion port is host-visible only through
    the external USB connection or whether add-on modules also need direct I2S
    access to the DSP for standalone Bluetooth audio.
